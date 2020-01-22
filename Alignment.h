@@ -12,7 +12,8 @@ namespace Align {
 
 enum class NucleicAcidType {
         DNA,
-        RNA
+        RNA,
+        DNA_OR_RNA
     };
 
 
@@ -70,13 +71,17 @@ enum class NucleicAcidType {
         public:
         Alignment(std::string s1, std::string s2) : m_s1(s1), m_s2(s2) {
         }
-        void align();
+        void align(bool isLocalAlignment);
         friend std::ostream& operator<<(std::ostream& os, const Alignment& ali);
 
         private:
-            void traceback(const Matrix& M);
-            void initMatrix(Matrix& M, const EditDistance& dist);
+            void traceback(const Matrix& M, bool isLocalAlignment);
+            void initMatrixGlobal(Matrix& M, const EditDistance& dist);
+                /// Initialize similarity matrix for global alignment
+            void initMatrixLocal(Matrix& M, const EditDistance& dist);
+                /// Initialize similarity matrix for local alignment
             void fillMatrix(Matrix& M, const EditDistance& dist);
+                /// Fill the similarity matrix using dynamic programming
             std::string m_s1;
                 // Input sequence s1
             std::string m_s2;

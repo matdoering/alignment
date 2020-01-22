@@ -91,6 +91,18 @@ float EditDistance::dist(const char& c1, const char& c2) const {
 }
 
 namespace{
+    void checkAllowedCharacters(std::map<char, size_t> charCounts, std::vector<char> allowed) {
+        size_t allowedCount = 0;
+        for (char& allowedChar : allowed) {
+            if (charCounts.find(allowedChar) != charCounts.end()) {
+                ++allowedCount;
+            }
+        }
+        if (charCounts.size() - allowedCount > 0) {
+            throw std::invalid_argument("Disallowed character found in input sequence.");
+        }
+    }
+
     size_t getMaxIdx(std::vector<float> vals) {
         size_t maxIdx = 0;
         for (size_t i =0; i < vals.size(); ++i) {
@@ -144,23 +156,32 @@ std::ostream& operator<<(std::ostream& os, const Matrix& m) {
 }
 
 NucleicAcidType detectNucleicAcidType(const std::string& s) {
+    std::map<char, size_t> charCounts;
     size_t countT = 0;
     size_t countU = 0;
     for (auto& c : s) {
-        if (c == 'T') {
-            ++countT;
-        } else if (c == 'U') {
-            ++countU;
-        }
+        charCounts[c]++;
     }
-    if (countT > 0 && countU > 0) {
+    bool foundT = charCounts.find('T') != charCounts.end();
+    bool foundU = charCounts.find('U') != charCounts.end();
+    if (foundT && foundU) {
         throw std::invalid_argument("Input sequence used both T's and U's");
     }
-    if (countU > 0) {
-        // assume RNA
+    if (foundU) {
+        // must be RNA
+        std::vector<char> allowed = {'A', 'C', 'G', 'U'};
+        checkAllowedCharacters(charCounts, allowed);
         return NucleicAcidType::RNA;
-    } else {
+    } else if (foundT) {
+        // must be DNA
+        std::vector<char> allowed = {'A', 'C', 'G', 'T'};
+        checkAllowedCharacters(charCounts, allowed);
         return NucleicAcidType::DNA;
+    } else {
+        // DNA or RNA possible
+        std::vector<char> allowed = {'A', 'C', 'G'};
+        checkAllowedCharacters(charCounts, allowed);
+        return NucleicAcidType::DNA_OR_RNA;
     }
 }
 
@@ -175,19 +196,36 @@ std::ostream& operator<<(std::ostream& os, const Alignment& ali) {
 }
 
 
-void Alignment::align() {
+void Alignment::align(bool isLocalAlignment) {
     // detect nucleic acid type and choose edit distance
     NucleicAcidType s1Type = detectNucleicAcidType(m_s1);
     NucleicAcidType s2Type = detectNucleicAcidType(m_s2);
+    if (s1Type == NucleicAcidType::DNA_OR_RNA && s2Type != NucleicAcidType::DNA_OR_RNA) {
+        // DNA or RNA possible - adjust according to other seq
+        s1Type = s2Type;
+    }
+    if (s2Type == NucleicAcidType::DNA_OR_RNA && s1Type != NucleicAcidType::DNA_OR_RNA) {
+        // DNA or RNA possible - adjust according to other seq
+        s2Type = s1Type;
+    }
+    if (s1Type == NucleicAcidType::DNA_OR_RNA && s2Type == NucleicAcidType::DNA_OR_RNA) {
+        // cannot distinguish between DNA/RNA: assume DNA
+        s1Type = NucleicAcidType::DNA;
+        s2Type = NucleicAcidType::DNA;
+    }
     if (s1Type != s2Type) {
         throw std::invalid_argument("Input sequence types (DNA/RNA) do not match");
     }
     EditDistance dist(s1Type);
     
     Matrix m(m_s1.size()+1, m_s2.size()+1);
-    initMatrix(m, dist);
+    if (isLocalAlignment) {
+        initMatrixLocal(m, dist);
+    } else {
+        initMatrixGlobal(m, dist);
+    }
     fillMatrix(m, dist);
-    traceback(m);
+    traceback(m, isLocalAlignment);
 }
 
 void Alignment::fillMatrix(Matrix&m, const EditDistance& dist) {
@@ -199,7 +237,21 @@ void Alignment::fillMatrix(Matrix&m, const EditDistance& dist) {
     }
 }
 
-void Alignment::initMatrix(Matrix& m, const EditDistance& dist) {
+void Alignment::initMatrixLocal(Matrix& m, const EditDistance& dist) {
+    matrix& M = m.M;
+    BacktrackingChoice invalidChoice = BacktrackingChoice::DIAG;
+
+    // init column 0
+    for (size_t row = 0; row < m.nrow; ++row) {
+        M[row][0] = Elem(0.0, std::make_pair(-1, row-1), invalidChoice);
+    }
+    // init row 0
+    for (size_t col = 0; col < m.ncol; ++col) {
+        M[0][col] = Elem(0.0, std::make_pair(col-1, -1), invalidChoice);
+    }
+}
+
+void Alignment::initMatrixGlobal(Matrix& m, const EditDistance& dist) {
     matrix& M = m.M;
     BacktrackingChoice invalidChoice = BacktrackingChoice::DIAG;
 
@@ -218,10 +270,25 @@ void Alignment::initMatrix(Matrix& m, const EditDistance& dist) {
     }
 }
 
-void Alignment::traceback(const Matrix& m) {
+void Alignment::traceback(const Matrix& m, bool isLocalAlignment) {
     const matrix& M = m.M;
-    std::pair<int,int> btCoord = std::make_pair(m.nrow-1,m.ncol-1);
-    std::pair<int,int> stopCoord = std::make_pair(-1,-1);
+    // select start location for traceback
+    std::pair<int,int> btCoord;
+    if (isLocalAlignment) {
+        // local alignment: select max value in the matrix
+        float maxVal = 0.0;
+        for (size_t row = 1; row < m.nrow; ++row) {
+            for (size_t col = 1; col < m.ncol; ++col) {
+                if (M[row][col].value >= maxVal) {
+                    maxVal = M[row][col].value;
+                    btCoord = std::make_pair(row, col);
+                }
+            }
+        }
+    } else {
+        // global alignment: start from bottom right
+        btCoord = std::make_pair(m.nrow-1,m.ncol-1);
+    }
 
     size_t expectedAliSize = m.nrow > m.ncol ? m.nrow-1 : m.ncol-1;
     m_s1A = "";
@@ -230,12 +297,13 @@ void Alignment::traceback(const Matrix& m) {
     m_s2A.resize(expectedAliSize);
 
     m_aliScore = 0.0;
-    while (btCoord != stopCoord) {
+    while (btCoord.first > 0 && btCoord.second > 0) {
         const Elem& elem = M[btCoord.first][btCoord.second];
+        m_aliScore += elem.value;
         // build alignment string
         BacktrackingChoice btChoice = elem.backtrackingChoice;
-        const char& c1 = m_s1[btCoord.first];
-        const char& c2 = m_s2[btCoord.second];
+        const char& c1 = m_s1[btCoord.first-1];
+        const char& c2 = m_s2[btCoord.second-1];
         switch(btChoice) {
             case BacktrackingChoice::DIAG:
                 m_s1A += c1;
@@ -252,7 +320,6 @@ void Alignment::traceback(const Matrix& m) {
             case BacktrackingChoice::INVALID:
                 abort();
         }
-        m_aliScore += M[btCoord.first][btCoord.second].value;
         btCoord = elem.backtrackingCoordinate;
     }
     std::reverse(m_s1A.begin(), m_s1A.end());
